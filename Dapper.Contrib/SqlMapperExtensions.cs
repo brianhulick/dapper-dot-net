@@ -37,9 +37,11 @@ namespace Dapper.Contrib.Extensions
 
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> KeyProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ExplicitKeyProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
+        private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> InsertableKeyProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> TypeProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ComputedProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> GetQueries = new ConcurrentDictionary<RuntimeTypeHandle, string>();
+        private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> GetByComplexIdQueries = new ConcurrentDictionary<RuntimeTypeHandle, string>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> TypeTableName = new ConcurrentDictionary<RuntimeTypeHandle, string>();
 
         private static readonly ISqlAdapter DefaultAdapter = new SqlServerAdapter();
@@ -52,6 +54,28 @@ namespace Dapper.Contrib.Extensions
                 {"sqliteconnection", new SQLiteAdapter()},
                 {"mysqlconnection", new MySqlAdapter()},
             };
+
+        private static List<PropertyInfo> InsertableKeyPropertiesCache(Type type)
+        {
+            IEnumerable<PropertyInfo> pi;
+            if (InsertableKeyProperties.TryGetValue(type.TypeHandle, out pi))
+            {
+                return pi.ToList();
+            }
+
+            var props = KeyPropertiesCache(type);
+            var insertableKeyProperties = props.Where(p =>
+            {
+                return p.GetCustomAttributes(true).Any(a =>
+                {
+                    return (a is KeyAttribute && ((KeyAttribute)a).InsertInclude)
+                        || (a is ExplicitKeyAttribute && ((ExplicitKeyAttribute)a).InsertInclude);
+                });
+            }).ToList();
+
+            InsertableKeyProperties[type.TypeHandle] = insertableKeyProperties;
+            return insertableKeyProperties;
+        }
 
         private static List<PropertyInfo> ComputedPropertiesCache(Type type)
         {
@@ -143,6 +167,51 @@ namespace Dapper.Contrib.Extensions
                 throw new DataException($"{method}<T> only supports an entity with a [Key] or an [ExplicitKey] property");
 
             return keys.Any() ? keys.First() : explicitKeys.First();
+        }
+
+        public static TResult GetByComplexId<TResult, TIdentity>(this IDbConnection connection, TIdentity id, IDbTransaction transaction = null, int? commandTimeout = null) where TResult : class
+        {
+            var type = typeof(TResult);
+            var idType = typeof(TIdentity);
+            var keys = TypePropertiesCache(idType);
+
+            string sql;
+            if (!GetByComplexIdQueries.TryGetValue(type.TypeHandle, out sql))
+            {
+                var name = GetTableName(type);
+
+                sql = $"select * from {name}";
+                for (var keyCount = 0; keyCount < keys.Count; keyCount++)
+                {
+                    sql += ((keyCount == 0) ? $" WHERE " : $" AND ") + $"{keys[keyCount].Name} = @{keys[keyCount].Name}";
+                }
+                GetByComplexIdQueries[type.TypeHandle] = sql;
+            }
+
+            TResult obj;
+
+            if (type.IsInterface())
+            {
+                var res = connection.Query(sql, id).FirstOrDefault() as IDictionary<string, object>;
+
+                if (res == null)
+                    return null;
+
+                obj = ProxyGenerator.GetInterfaceProxy<TResult>();
+
+                foreach (var property in TypePropertiesCache(type))
+                {
+                    var val = res[property.Name];
+                    property.SetValue(obj, Convert.ChangeType(val, property.PropertyType), null);
+                }
+
+                ((IProxy)obj).IsDirty = false;   //reset change tracking and return
+            }
+            else
+            {
+                obj = connection.Query<TResult>(sql, id, transaction, commandTimeout: commandTimeout).FirstOrDefault();
+            }
+            return obj;
         }
 
         /// <summary>
@@ -305,25 +374,27 @@ namespace Dapper.Contrib.Extensions
             var sbColumnList = new StringBuilder(null);
             var allProperties = TypePropertiesCache(type);
             var keyProperties = KeyPropertiesCache(type);
+            var insertableKeyProperties = InsertableKeyPropertiesCache(type);
+            var nonInsertableKeyProperties = keyProperties.Except(insertableKeyProperties);
             var computedProperties = ComputedPropertiesCache(type);
-            var allPropertiesExceptKeyAndComputed = allProperties.Except(keyProperties.Union(computedProperties)).ToList();
+            var allPropertiesExceptNonInsertKeyAndComputed = allProperties.Except(nonInsertableKeyProperties.Union(computedProperties)).ToList();
 
             var adapter = GetFormatter(connection);
 
-            for (var i = 0; i < allPropertiesExceptKeyAndComputed.Count; i++)
+            for (var i = 0; i < allPropertiesExceptNonInsertKeyAndComputed.Count; i++)
             {
-                var property = allPropertiesExceptKeyAndComputed.ElementAt(i);
+                var property = allPropertiesExceptNonInsertKeyAndComputed.ElementAt(i);
                 adapter.AppendColumnName(sbColumnList, property.Name);  //fix for issue #336
-                if (i < allPropertiesExceptKeyAndComputed.Count - 1)
+                if (i < allPropertiesExceptNonInsertKeyAndComputed.Count - 1)
                     sbColumnList.Append(", ");
             }
 
             var sbParameterList = new StringBuilder(null);
-            for (var i = 0; i < allPropertiesExceptKeyAndComputed.Count; i++)
+            for (var i = 0; i < allPropertiesExceptNonInsertKeyAndComputed.Count; i++)
             {
-                var property = allPropertiesExceptKeyAndComputed.ElementAt(i);
+                var property = allPropertiesExceptNonInsertKeyAndComputed.ElementAt(i);
                 sbParameterList.AppendFormat("@{0}", property.Name);
-                if (i < allPropertiesExceptKeyAndComputed.Count - 1)
+                if (i < allPropertiesExceptNonInsertKeyAndComputed.Count - 1)
                     sbParameterList.Append(", ");
             }
 
@@ -648,11 +719,23 @@ namespace Dapper.Contrib.Extensions
     [AttributeUsage(AttributeTargets.Property)]
     public class KeyAttribute : Attribute
     {
+        public KeyAttribute(bool insertInclude = false)
+        {
+            InsertInclude = insertInclude;
+        }
+
+        public bool InsertInclude { get; set; }
     }
 
     [AttributeUsage(AttributeTargets.Property)]
     public class ExplicitKeyAttribute : Attribute
     {
+        public ExplicitKeyAttribute(bool insertInclude = false)
+        {
+            InsertInclude = insertInclude;
+        }
+
+        public bool InsertInclude { get; set; }
     }
 
     [AttributeUsage(AttributeTargets.Property)]

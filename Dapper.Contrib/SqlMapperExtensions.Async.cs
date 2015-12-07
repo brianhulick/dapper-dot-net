@@ -19,6 +19,46 @@ namespace Dapper.Contrib.Extensions
 {
     public static partial class SqlMapperExtensions
     {
+        public static async Task<TResult> GetByComplexIdAsync<TResult, TIdentity>(this IDbConnection connection, TIdentity id, IDbTransaction transaction = null, int? commandTimeout = null) where TResult : class
+        {
+            var type = typeof(TResult);
+            var idType = typeof(TIdentity);
+            var keys = TypePropertiesCache(idType);
+
+            string sql;
+            if (!GetByComplexIdQueries.TryGetValue(type.TypeHandle, out sql))
+            {
+                var name = GetTableName(type);
+
+                sql = $"select * from {name}";
+                for (var keyCount = 0; keyCount < keys.Count; keyCount++)
+                {
+                    sql += ((keyCount == 0) ? $" WHERE " : $" AND ") + $"{keys[keyCount].Name} = @{keys[keyCount].Name}";
+                }
+                GetByComplexIdQueries[type.TypeHandle] = sql;
+            }
+
+            if (!type.IsInterface())
+                return (await connection.QueryAsync<TResult>(sql, id, transaction, commandTimeout).ConfigureAwait(false)).FirstOrDefault();
+
+            var res = (await connection.QueryAsync<dynamic>(sql, id).ConfigureAwait(false)).FirstOrDefault() as IDictionary<string, object>;
+
+            if (res == null)
+                return null;
+
+            var obj = ProxyGenerator.GetInterfaceProxy<TResult>();
+
+            foreach (var property in TypePropertiesCache(type))
+            {
+                var val = res[property.Name];
+                property.SetValue(obj, Convert.ChangeType(val, property.PropertyType), null);
+            }
+
+            ((IProxy)obj).IsDirty = false;   //reset change tracking and return
+
+            return obj;
+        }
+
         /// <summary>
         /// Returns a single entity by a single id from table "Ts" asynchronously using .NET 4.5 Task. T must be of interface type. 
         /// Id must be marked with [Key] attribute.
@@ -145,23 +185,25 @@ namespace Dapper.Contrib.Extensions
             var sbColumnList = new StringBuilder(null);
             var allProperties = TypePropertiesCache(type);
             var keyProperties = KeyPropertiesCache(type);
+            var insertableKeyProperties = InsertableKeyPropertiesCache(type);
+            var nonInsertableKeyProperties = keyProperties.Except(insertableKeyProperties);
             var computedProperties = ComputedPropertiesCache(type);
-            var allPropertiesExceptKeyAndComputed = allProperties.Except(keyProperties.Union(computedProperties)).ToList();
+            var allPropertiesExceptNonInsertKeyAndComputed = allProperties.Except(nonInsertableKeyProperties.Union(computedProperties)).ToList();
 
-            for (var i = 0; i < allPropertiesExceptKeyAndComputed.Count; i++)
+            for (var i = 0; i < allPropertiesExceptNonInsertKeyAndComputed.Count; i++)
             {
-                var property = allPropertiesExceptKeyAndComputed.ElementAt(i);
+                var property = allPropertiesExceptNonInsertKeyAndComputed.ElementAt(i);
                 sqlAdapter.AppendColumnName(sbColumnList, property.Name);
-                if (i < allPropertiesExceptKeyAndComputed.Count - 1)
+                if (i < allPropertiesExceptNonInsertKeyAndComputed.Count - 1)
                     sbColumnList.Append(", ");
             }
 
             var sbParameterList = new StringBuilder(null);
-            for (var i = 0; i < allPropertiesExceptKeyAndComputed.Count; i++)
+            for (var i = 0; i < allPropertiesExceptNonInsertKeyAndComputed.Count; i++)
             {
-                var property = allPropertiesExceptKeyAndComputed.ElementAt(i);
+                var property = allPropertiesExceptNonInsertKeyAndComputed.ElementAt(i);
                 sbParameterList.AppendFormat("@{0}", property.Name);
-                if (i < allPropertiesExceptKeyAndComputed.Count - 1)
+                if (i < allPropertiesExceptNonInsertKeyAndComputed.Count - 1)
                     sbParameterList.Append(", ");
             }
 
