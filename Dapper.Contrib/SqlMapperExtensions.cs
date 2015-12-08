@@ -41,7 +41,7 @@ namespace Dapper.Contrib.Extensions
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> TypeProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>> ComputedProperties = new ConcurrentDictionary<RuntimeTypeHandle, IEnumerable<PropertyInfo>>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> GetQueries = new ConcurrentDictionary<RuntimeTypeHandle, string>();
-        private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> GetByComplexIdQueries = new ConcurrentDictionary<RuntimeTypeHandle, string>();
+        private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> GetByTIdentityQueries = new ConcurrentDictionary<RuntimeTypeHandle, string>();
         private static readonly ConcurrentDictionary<RuntimeTypeHandle, string> TypeTableName = new ConcurrentDictionary<RuntimeTypeHandle, string>();
 
         private static readonly ISqlAdapter DefaultAdapter = new SqlServerAdapter();
@@ -169,14 +169,14 @@ namespace Dapper.Contrib.Extensions
             return keys.Any() ? keys.First() : explicitKeys.First();
         }
 
-        public static TResult GetByComplexId<TResult, TIdentity>(this IDbConnection connection, TIdentity id, IDbTransaction transaction = null, int? commandTimeout = null) where TResult : class
+        public static TResult GetByTIdentity<TResult, TIdentity>(this IDbConnection connection, TIdentity id, IDbTransaction transaction = null, int? commandTimeout = null) where TResult : class
         {
             var type = typeof(TResult);
             var idType = typeof(TIdentity);
             var keys = TypePropertiesCache(idType);
 
             string sql;
-            if (!GetByComplexIdQueries.TryGetValue(type.TypeHandle, out sql))
+            if (!GetByTIdentityQueries.TryGetValue(type.TypeHandle, out sql))
             {
                 var name = GetTableName(type);
 
@@ -185,7 +185,7 @@ namespace Dapper.Contrib.Extensions
                 {
                     sql += ((keyCount == 0) ? $" WHERE " : $" AND ") + $"{keys[keyCount].Name} = @{keys[keyCount].Name}";
                 }
-                GetByComplexIdQueries[type.TypeHandle] = sql;
+                GetByTIdentityQueries[type.TypeHandle] = sql;
             }
 
             TResult obj;

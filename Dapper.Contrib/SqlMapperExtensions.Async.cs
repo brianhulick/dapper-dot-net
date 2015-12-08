@@ -19,14 +19,14 @@ namespace Dapper.Contrib.Extensions
 {
     public static partial class SqlMapperExtensions
     {
-        public static async Task<TResult> GetByComplexIdAsync<TResult, TIdentity>(this IDbConnection connection, TIdentity id, IDbTransaction transaction = null, int? commandTimeout = null) where TResult : class
+        public static async Task<TResult> GetByTIdentityAsync<TResult, TIdentity>(this IDbConnection connection, TIdentity id, IDbTransaction transaction = null, int? commandTimeout = null) where TResult : class
         {
             var type = typeof(TResult);
             var idType = typeof(TIdentity);
             var keys = TypePropertiesCache(idType);
 
             string sql;
-            if (!GetByComplexIdQueries.TryGetValue(type.TypeHandle, out sql))
+            if (!GetByTIdentityQueries.TryGetValue(type.TypeHandle, out sql))
             {
                 var name = GetTableName(type);
 
@@ -35,7 +35,7 @@ namespace Dapper.Contrib.Extensions
                 {
                     sql += ((keyCount == 0) ? $" WHERE " : $" AND ") + $"{keys[keyCount].Name} = @{keys[keyCount].Name}";
                 }
-                GetByComplexIdQueries[type.TypeHandle] = sql;
+                GetByTIdentityQueries[type.TypeHandle] = sql;
             }
 
             if (!type.IsInterface())
