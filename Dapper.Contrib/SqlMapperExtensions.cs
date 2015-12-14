@@ -169,7 +169,51 @@ namespace Dapper.Contrib.Extensions
             return keys.Any() ? keys.First() : explicitKeys.First();
         }
 
-        public static TResult GetByTIdentity<TResult, TIdentity>(this IDbConnection connection, TIdentity id, IDbTransaction transaction = null, int? commandTimeout = null) where TResult : class
+        public static IEnumerable<TResult> QueryByTCriteria<TResult, TCriteria>(this IDbConnection connection, TCriteria criteria, IDbTransaction transaction = null, int? commandTimeout = null)
+            where TResult : class
+            where TCriteria : class
+        {
+            var type = typeof(TResult);
+            var criteriaType = typeof(TCriteria);
+            var criteriaProps = TypePropertiesCache(criteriaType);
+            var tblName = GetTableName(criteriaType);
+
+            List<string> clauses = new List<string>();
+            clauses.Add("SELECT *");
+            clauses.Add("FROM " + tblName);
+
+            List<string> where = new List<string>();
+            List<string> orderBy = new List<string>();
+            foreach (var prop in criteriaProps)
+            {
+                var critAttr = (CriteriaAttribute)prop.GetCustomAttributes(true).FirstOrDefault(a => a is CriteriaAttribute);
+                var dbField = (critAttr != null && !string.IsNullOrEmpty(critAttr.DbField)) ? critAttr.DbField : prop.Name;
+
+                if (critAttr != null && !string.IsNullOrEmpty(critAttr.OrderBy) && (critAttr.OrderBy.ToUpper() == "ASC" || critAttr.OrderBy.ToUpper() == "DESC"))
+                    orderBy.Add(dbField + " " + critAttr.OrderBy);
+
+                if (prop.GetValue(criteria, null) != null)
+                {
+                    bool isCollection = prop.PropertyType != typeof(string) && typeof(System.Collections.IEnumerable).IsAssignableFrom(prop.PropertyType);
+                    var op = (critAttr != null && !string.IsNullOrEmpty(critAttr.EqualityOperator)) ? critAttr.EqualityOperator : (isCollection) ? "IN" : "=";
+                    where.Add(string.Format("{0} {1} @{2}", dbField, op, prop.Name));
+                }
+            }
+
+            if (where.Count > 0)
+                clauses.Add("WHERE " + string.Join(" AND ", where));
+
+            if (orderBy.Count > 0)
+                clauses.Add("ORDER BY " + string.Join(", ", orderBy));
+
+            var sql = string.Join(" ", clauses);
+
+            return connection.Query<TResult>(sql, criteria, transaction, commandTimeout: commandTimeout);
+        }
+
+        public static TResult GetByTIdentity<TResult, TIdentity>(this IDbConnection connection, TIdentity id, IDbTransaction transaction = null, int? commandTimeout = null)
+            where TResult : class
+            where TIdentity : class
         {
             var type = typeof(TResult);
             var idType = typeof(TIdentity);
@@ -736,6 +780,18 @@ namespace Dapper.Contrib.Extensions
         }
 
         public bool InsertInclude { get; set; }
+    }
+
+    [AttributeUsage(AttributeTargets.Property)]
+    public class CriteriaAttribute : Attribute
+    {
+        public CriteriaAttribute()
+        {
+        }
+
+        public string EqualityOperator { get; set; }
+        public string DbField { get; set; }
+        public string OrderBy { get; set; }
     }
 
     [AttributeUsage(AttributeTargets.Property)]
